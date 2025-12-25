@@ -1,0 +1,85 @@
+name: Auto PR via Bot
+
+on:
+  # Trigger on push if the commit message contains "[PR]" or "[pr]"
+  push:
+    # Ignoring the branches from which we don't want to create PRs
+    branches-ignore:
+      - main
+      - master
+      - dev
+      - staging
+      - production
+  # Allow manual triggering from the Actions tab
+  workflow_dispatch:
+    inputs:
+      target_branch:
+        description: 'Branch to merge into'
+        default: 'main'
+        required: false
+
+jobs:
+  create-pr:
+    name: Create PR as Bot
+    runs-on: ubuntu-latest
+    # Only run if manual dispatch OR commit message has magic string
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.head_commit.message, '[PR]') || 
+      contains(github.event.head_commit.message, '[pr]')
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Generates a token from the GitHub App installed in your Org
+      # This allows the "Bot" to act on behalf of the App, not a specific user.
+      - name: Generate Bot Token
+        id: generate-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.BOT_APP_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: Create PR
+        env:
+          # Use the generated App token
+          GH_TOKEN: ${{ steps.generate-token.outputs.token }}
+        run: |
+          # 1. Determine Target Branch
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            BASE_BRANCH="${{ inputs.target_branch }}"
+          else
+            # Default to main for auto-trigger, or change to your default branch
+            BASE_BRANCH="main"
+          fi
+          
+          CURRENT_BRANCH="${{ github.ref_name }}"
+          
+          echo "Checking for existing PR from $CURRENT_BRANCH to $BASE_BRANCH..."
+          
+          # 2. Check if PR already exists
+          EXISTING_PR=$(gh pr list --head "$CURRENT_BRANCH" --base "$BASE_BRANCH" --json url --jq '.[0].url')
+          
+          if [ -n "$EXISTING_PR" ]; then
+            echo "PR already exists: $EXISTING_PR"
+            exit 0
+          fi
+          
+          # 3. Prepare Title and Body
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+             TITLE="feat: ${{ github.ref_name }}"
+             BODY="Manually triggered PR by Bot."
+          else
+             # Get the first line of the commit message
+             RAW_TITLE=$(echo "${{ github.event.head_commit.message }}" | head -n 1)
+             # Remove [PR] or [pr] from the title for the PR display
+             TITLE=$(echo "$RAW_TITLE" | sed -e 's/\[PR\]//g' -e 's/\[pr\]//g' | xargs)
+             BODY="Automated PR created by Bot. Triggered by commit message."
+          fi
+
+          echo "Creating PR..."
+          gh pr create \
+            --base "$BASE_BRANCH" \
+            --head "$CURRENT_BRANCH" \
+            --title "$TITLE" \
+            --body "$BODY"
